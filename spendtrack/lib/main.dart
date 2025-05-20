@@ -1,27 +1,16 @@
 import 'package:flutter/material.dart';
-import 'package:sqflite_common_ffi/sqflite_ffi.dart'; // Import FFI
-import 'dart:io'; // Import for Platform check
-
-import 'screens/transaction_list_page.dart';
-import 'db/database_helper.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:spendtrack/firebase_options.dart';
+import 'package:spendtrack/services/auth_service.dart';
+import 'package:spendtrack/screens/auth_wrapper.dart';
+import 'package:provider/provider.dart';
+import 'package:firebase_auth/firebase_auth.dart' as fb_auth;
 
 void main() async {
-  // VERY IMPORTANT: This line MUST be the first line in main()
   WidgetsFlutterBinding.ensureInitialized();
-
-  // Initialize FFI for desktop or testing if necessary
-  if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
-    sqfliteFfiInit(); // Initialize FFI
-    databaseFactory = databaseFactoryFfi; // Set the FFI factory
-  }
-  // If you are ONLY developing for desktop and not mobile, you might just do:
-  // sqfliteFfiInit();
-  // databaseFactory = databaseFactoryFfi;
-  // without the Platform check.
-
-  // Optional: Explicitly initialize the database (can help with timing)
-  // await DatabaseHelper.instance.database;
-
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform,
+  );
   runApp(const MyApp());
 }
 
@@ -30,16 +19,27 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Transaction Tracker',
-      theme: ThemeData(
-        primarySwatch: Colors.teal,
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
-        useMaterial3: true,
-        visualDensity: VisualDensity.adaptivePlatformDensity,
+    return MultiProvider(
+      providers: [
+        Provider<AuthService>(
+          create: (_) => AuthService(fb_auth.FirebaseAuth.instance),
+        ),
+        StreamProvider(
+          create: (context) => context.read<AuthService>().authStateChanges,
+          initialData: null,
+        ),
+      ],
+      child: MaterialApp(
+        title: 'Transaction Tracker',
+        theme: ThemeData(
+          primarySwatch: Colors.teal,
+          colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
+          useMaterial3: true,
+          visualDensity: VisualDensity.adaptivePlatformDensity,
+        ),
+        debugShowCheckedModeBanner: false,
+        home: const AuthWrapper(), // Start with AuthWrapper
       ),
-      debugShowCheckedModeBanner: false,
-      home: const TransactionListPage(),
     );
   }
 }

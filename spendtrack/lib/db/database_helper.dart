@@ -1,114 +1,121 @@
-// lib/db/database_helper.dart
-import 'package:sqflite/sqflite.dart';
-import 'package:path/path.dart';
-import '../models/transaction_model.dart';
-import '../models/recurring_transaction_suggestion.dart';
+// No more sqflite imports needed for main transaction data
+import 'package:firebase_auth/firebase_auth.dart' as fb_auth;
+import 'package:firebase_database/firebase_database.dart';
+import 'package:spendtrack/models/transaction_model.dart';
+import 'package:spendtrack/models/recurring_transaction_suggestion.dart';
 
 class DatabaseHelper {
-  static const _databaseName = "MyTransactions.db";
-  static const _databaseVersion = 1; // Increment if schema changes
+  final FirebaseDatabase _database = FirebaseDatabase.instance;
+  final fb_auth.FirebaseAuth _firebaseAuth = fb_auth.FirebaseAuth.instance;
 
-  static const table = 'transactions';
+  // Make this a singleton class (optional, but common pattern)
+  DatabaseHelper._privateConstructor();
+  static final DatabaseHelper instance = DatabaseHelper._privateConstructor();
 
-  static const columnId = 'id';
-  static const columnAmount = 'amount';
-  static const columnDescription = 'description';
-  static const columnTags = 'tags';
-  static const columnDate = 'date';
+  String? get _userId => _firebaseAuth.currentUser?.uid;
 
-  // Make this a singleton class
-  DatabaseHelper._privateConstructor(); // Private constructor
-  static final DatabaseHelper instance = DatabaseHelper._privateConstructor(); // Static final instance
-
-  // Only have a single app-wide reference to the database
-  static Database? _database;
-
-  Future<Database> get database async {
-    if (_database != null) return _database!;
-    _database = await _initDatabase();
-    return _database!;
+  DatabaseReference? _userTransactionsRef() {
+    final userId = _userId;
+    if (userId == null) return null;
+    return _database.ref('users/$userId/transactions');
   }
 
-  // This opens the database (and creates it if it doesn't exist)
-  Future<Database> _initDatabase() async {
-    String path = join(await getDatabasesPath(), _databaseName);
-    return await openDatabase(
-      path,
-      version: _databaseVersion,
-      onCreate: _onCreate,
-      // onUpgrade: _onUpgrade, // Add if you have schema migrations
-    );
-  }
-
-  // SQL code to create the database table
-  Future _onCreate(Database db, int version) async {
-    await db.execute('''
-      CREATE TABLE $table (
-        $columnId INTEGER PRIMARY KEY AUTOINCREMENT,
-        $columnAmount REAL NOT NULL,
-        $columnDescription TEXT NOT NULL,
-        $columnTags TEXT,
-        $columnDate TEXT NOT NULL
-      )
-    ''');
-  }
-
-  // Optional: Add _onUpgrade for schema migrations
-  // Future _onUpgrade(Database db, int oldVersion, int newVersion) async {
-  //   if (oldVersion < 2) {
-  //     // await db.execute("ALTER TABLE $table ADD COLUMN new_column TEXT;");
-  //   }
-  // }
-
-  // --- CRUD Methods ---
-  Future<int> insert(TransactionModel transaction) async {
-    Database db = await instance.database;
-    return await db.insert(table, transaction.toMap());
+  Future<String?> insert(TransactionModel transaction) async {
+    final ref = _userTransactionsRef();
+    if (ref == null) {
+      print("User not logged in, cannot insert transaction.");
+      throw Exception("User not authenticated");
+    }
+    try {
+      // Use push() to generate a unique ID for the transaction
+      final newTransactionRef = ref.push();
+      await newTransactionRef.set(transaction.toMapWithoutId()); // Save data without local ID
+      print("Transaction inserted to Firebase with key: ${newTransactionRef.key}");
+      return newTransactionRef.key; // Return Firebase key
+    } catch (e) {
+      print("Error inserting transaction to Firebase: $e");
+      rethrow;
+    }
   }
 
   Future<List<TransactionModel>> getAllTransactions() async {
-    Database db = await instance.database;
-    final List<Map<String, dynamic>> maps = await db.query(
-      table,
-      orderBy: '$columnDate DESC',
-    );
-    return List.generate(maps.length, (i) {
-      return TransactionModel.fromMap(maps[i]);
-    });
+    final ref = _userTransactionsRef();
+    if (ref == null) {
+      print("User not logged in, cannot fetch transactions.");
+      return [];
+    }
+    try {
+      final snapshot = await ref.orderByChild('date').once(); // Order by date
+      final List<TransactionModel> transactions = [];
+      if (snapshot.snapshot.value != null) {
+        final Map<dynamic, dynamic> transactionsMap =
+        snapshot.snapshot.value as Map<dynamic, dynamic>;
+        transactionsMap.forEach((key, value) {
+          final transactionData = Map<String, dynamic>.from(value as Map);
+          // Add Firebase key as 'id' to the model for client-side identification
+          transactions.add(TransactionModel.fromMapFirebase(key, transactionData));
+        });
+        // Sort client-side if needed (Firebase sorts ascending, we want descending for display)
+        transactions.sort((a, b) => b.date.compareTo(a.date));
+      }
+      print("Fetched ${transactions.length} transactions from Firebase.");
+      return transactions;
+    } catch (e) {
+      print("Error fetching transactions from Firebase: $e");
+      return [];
+    }
   }
 
-  Future<int> update(TransactionModel transaction) async {
-    Database db = await instance.database;
-    int id = transaction.id!;
-    return await db.update(table, transaction.toMap(),
-        where: '$columnId = ?', whereArgs: [id]);
-  }
-
-  Future<int> delete(int id) async {
-    Database db = await instance.database;
-    return await db.delete(table, where: '$columnId = ?', whereArgs: [id]);
+  Future<void> delete(String firebaseKey) async { // Now takes Firebase key
+    final ref = _userTransactionsRef();
+    if (ref == null) {
+      print("User not logged in, cannot delete transaction.");
+      throw Exception("User not authenticated");
+    }
+    try {
+      await ref.child(firebaseKey).remove();
+      print("Transaction deleted from Firebase with key: $firebaseKey");
+    } catch (e) {
+      print("Error deleting transaction from Firebase: $e");
+      rethrow;
+    }
   }
 
   Future<List<RecurringTransactionSuggestion>> getTopRecurringTransactions() async {
-    final db = await instance.database;
-    final List<Map<String, dynamic>> maps = await db.rawQuery('''
-      SELECT $columnAmount, $columnTags, COUNT(*) as recurrence_count
-      FROM $table
-      WHERE $columnAmount IS NOT NULL AND $columnTags IS NOT NULL AND $columnTags != '' 
-      GROUP BY $columnAmount, $columnTags
-      ORDER BY recurrence_count DESC
-      LIMIT 7 
-    '''); // CHANGED: LIMIT 3 to LIMIT 7
-
-    if (maps.isNotEmpty) {
-      return maps.map((map) {
-        return RecurringTransactionSuggestion(
-          amount: map[columnAmount] as double,
-          tags: map[columnTags] as String,
-          recurrenceCount: map['recurrence_count'] as int,
-        );
-      }).toList();
+    // Fetch all transactions for the user
+    final allTransactions = await getAllTransactions();
+    if (allTransactions.isEmpty) {
+      return [];
     }
-    return [];
+
+    // Client-side processing for recurrence
+    Map<String, int> recurrenceMap = {}; // Key: "amount_tags", Value: count
+
+    for (var transaction in allTransactions) {
+      if (transaction.tags.isNotEmpty) { // Only consider transactions with tags for suggestions
+        String key = "${transaction.amount.toInt()}_${transaction.tags.toLowerCase().trim()}";
+        recurrenceMap[key] = (recurrenceMap[key] ?? 0) + 1;
+      }
+    }
+
+    List<MapEntry<String, int>> sortedRecurrences = recurrenceMap.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value)); // Sort by count descending
+
+    List<RecurringTransactionSuggestion> suggestions = [];
+    for (int i = 0; i < sortedRecurrences.length && i < 7; i++) { // Top 7
+      var entry = sortedRecurrences[i];
+      List<String> parts = entry.key.split('_');
+      if (parts.length >= 2) {
+        double amount = double.tryParse(parts[0]) ?? 0.0;
+        String tags = parts.sublist(1).join('_'); // Re-join if tags had underscores
+        suggestions.add(RecurringTransactionSuggestion(
+          amount: amount,
+          tags: tags,
+          recurrenceCount: entry.value,
+        ));
+      }
+    }
+    print("Generated ${suggestions.length} recurring suggestions.");
+    return suggestions;
   }
 }

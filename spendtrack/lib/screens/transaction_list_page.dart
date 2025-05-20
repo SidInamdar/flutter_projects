@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart'; // For date formatting
-import '../models/transaction_model.dart';
-import '../db/database_helper.dart';
-import 'add_transaction_page.dart'; // To navigate to add transaction page
+import 'package:intl/intl.dart';
+import 'package:provider/provider.dart'; // For AuthService
+import 'package:spendtrack/services/auth_service.dart'; // For AuthService
+import 'package:spendtrack/models/transaction_model.dart';
+import 'package:spendtrack/db/database_helper.dart'; // Now uses Firebase
+import 'package:spendtrack/screens/add_transaction_page.dart';
 
 class TransactionListPage extends StatefulWidget {
   const TransactionListPage({super.key});
@@ -15,19 +17,34 @@ class _TransactionListPageState extends State<TransactionListPage> {
   late Future<List<TransactionModel>> _transactionsFuture;
   final DatabaseHelper _dbHelper = DatabaseHelper.instance;
   final String _indianRupeeSymbol = '₹';
-  int? _expandedTransactionId; // ID of the currently expanded transaction
+  String? _expandedTransactionId; // Firebase key of the expanded transaction
 
   @override
   void initState() {
     super.initState();
+    print("TransactionListPage: initState - Loading transactions for user.");
     _loadTransactions();
   }
 
   void _loadTransactions() {
+    if (!mounted) return;
+    final authService = Provider.of<AuthService>(context, listen: false);
+    if (authService.currentUser == null) {
+      print("TransactionListPage: User not logged in, cannot load transactions.");
+      // This case should ideally be handled by AuthWrapper, but as a safeguard:
+      setState(() {
+        _transactionsFuture = Future.value([]); // Return empty if no user
+      });
+      return;
+    }
     setState(() {
-      // Reset expanded ID when reloading, or you might keep it
-      // _expandedTransactionId = null;
-      _transactionsFuture = _dbHelper.getAllTransactions();
+      _transactionsFuture = _dbHelper.getAllTransactions().catchError((e) {
+        print("TransactionListPage: Error in _loadTransactions future: $e");
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Error loading transactions: $e"), backgroundColor: Colors.red),
+        );
+        return <TransactionModel>[]; // Return empty list on error
+      });
     });
   }
 
@@ -36,12 +53,16 @@ class _TransactionListPageState extends State<TransactionListPage> {
       context,
       MaterialPageRoute(builder: (context) => const AddTransactionPage()),
     );
-    if (result == true) {
+    if (result == true) { // Assuming AddTransactionPage returns true on successful save
       _loadTransactions();
     }
   }
 
   Future<void> _showDeleteConfirmationDialog(TransactionModel transaction) async {
+    if (transaction.id == null) {
+      print("Cannot delete transaction with null ID (Firebase key).");
+      return;
+    }
     return showDialog<void>(
       context: context,
       barrierDismissible: false,
@@ -60,16 +81,14 @@ class _TransactionListPageState extends State<TransactionListPage> {
           actions: <Widget>[
             TextButton(
               child: const Text('Cancel'),
-              onPressed: () {
-                Navigator.of(context).pop();
-              },
+              onPressed: () => Navigator.of(context).pop(),
             ),
             TextButton(
               style: TextButton.styleFrom(foregroundColor: Colors.red),
               child: const Text('Delete'),
               onPressed: () {
                 Navigator.of(context).pop();
-                _deleteTransaction(transaction.id!);
+                _deleteTransaction(transaction.id!); // Pass Firebase key
               },
             ),
           ],
@@ -78,20 +97,17 @@ class _TransactionListPageState extends State<TransactionListPage> {
     );
   }
 
-  Future<void> _deleteTransaction(int id) async {
+  Future<void> _deleteTransaction(String firebaseKey) async {
     try {
-      await _dbHelper.delete(id);
+      await _dbHelper.delete(firebaseKey);
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Transaction deleted successfully!'),
           backgroundColor: Colors.green,
         ),
       );
-      // If the deleted transaction was the expanded one, collapse it
-      if (_expandedTransactionId == id) {
-        setState(() {
-          _expandedTransactionId = null;
-        });
+      if (_expandedTransactionId == firebaseKey) {
+        setState(() => _expandedTransactionId = null);
       }
       _loadTransactions();
     } catch (e) {
@@ -104,31 +120,42 @@ class _TransactionListPageState extends State<TransactionListPage> {
     }
   }
 
-  void _toggleExpand(int transactionId) {
+  void _toggleExpand(String transactionId) { // Takes Firebase key
     setState(() {
       if (_expandedTransactionId == transactionId) {
-        _expandedTransactionId = null; // Collapse if already expanded
+        _expandedTransactionId = null;
       } else {
-        _expandedTransactionId = transactionId; // Expand this one
+        _expandedTransactionId = transactionId;
       }
     });
   }
 
   @override
   Widget build(BuildContext context) {
+    final authService = Provider.of<AuthService>(context, listen: false);
     return Scaffold(
       appBar: AppBar(
-        title: const Text('All Transactions'),
+        title: Text(authService.currentUser?.displayName?.split(' ')[0] ?? 'My Transactions'),
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
             onPressed: _loadTransactions,
+          ),
+          IconButton(
+            icon: const Icon(Icons.logout),
+            tooltip: 'Sign Out',
+            onPressed: () async {
+              await authService.signOut();
+              // AuthWrapper will handle navigation to LoginPage
+            },
           ),
         ],
       ),
       body: FutureBuilder<List<TransactionModel>>(
         future: _transactionsFuture,
         builder: (context, snapshot) {
+          // ... (FutureBuilder logic remains largely the same, ensure transaction.id is handled as Firebase key)
+          // Ensure _toggleExpand and delete use transaction.id! (which is now the Firebase key)
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
           } else if (snapshot.hasError) {
@@ -141,58 +168,39 @@ class _TransactionListPageState extends State<TransactionListPage> {
               itemCount: transactions.length,
               itemBuilder: (context, index) {
                 final transaction = transactions[index];
-                // Inside ListView.builder's itemBuilder:
-// ... (other code like final transaction = transactions[index]; etc.)
-
                 final bool isExpanded = _expandedTransactionId == transaction.id;
                 final String formattedDate = DateFormat('d MMM').format(transaction.date);
                 final String formattedAmount = '$_indianRupeeSymbol${transaction.amount.toInt()}';
 
                 if (transaction.id == null) {
-                  print("TransactionListPage: itemBuilder - Transaction ID is NULL for description: ${transaction.description}");
-                  return const Card(child: Padding(padding: EdgeInsets.all(8.0), child: Text("Error: Transaction ID is null")));
+                  return const Card(child: Padding(padding: EdgeInsets.all(8.0), child: Text("Error: Transaction missing ID")));
                 }
 
                 return Card(
                   margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                   child: InkWell(
-                    onLongPress: () {
-                      _toggleExpand(transaction.id!);
-                    },
-                    onTap: () {
-                      _toggleExpand(transaction.id!);
-                    },
+                    onLongPress: () => _toggleExpand(transaction.id!),
+                    onTap: () => _toggleExpand(transaction.id!),
                     child: Padding(
-                      // REDUCE VERTICAL PADDING HERE FOR COMPACT STATE
-                      padding: EdgeInsets.symmetric(
-                          horizontal: 10.0,
-                          vertical: isExpanded ? 12.0 : 5.0 // Changed 8.0 to 5.0 (or try 4.0)
-                      ),
+                      padding: EdgeInsets.symmetric(horizontal: 10.0, vertical: isExpanded ? 12.0 : 5.0),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min, // Make Column take minimum vertical space
+                        mainAxisSize: MainAxisSize.min,
                         children: [
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            crossAxisAlignment: CrossAxisAlignment.center, // Align items vertically in the center
+                            crossAxisAlignment: CrossAxisAlignment.center,
                             children: [
                               Flexible(
                                 child: Row(
-                                  crossAxisAlignment: CrossAxisAlignment.center, // Align items vertically
+                                  crossAxisAlignment: CrossAxisAlignment.center,
                                   children: [
-                                    Text(
-                                      formattedDate,
-                                      style: TextStyle(
-                                          fontSize: 13,
-                                          color: Colors.grey.shade700,
-                                          fontWeight: FontWeight.w500
-                                      ),
-                                    ),
+                                    Text(formattedDate, style: TextStyle(fontSize: 13, color: Colors.grey.shade700, fontWeight: FontWeight.w500)),
                                     const SizedBox(width: 8),
                                     if (!isExpanded)
                                       Expanded(
                                         child: Text(
-                                          transaction.description,
+                                          transaction.description.isNotEmpty ? transaction.description : (transaction.tags.isNotEmpty ? transaction.tags : "Transaction"),
                                           style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
                                           overflow: TextOverflow.ellipsis,
                                           maxLines: 1,
@@ -203,52 +211,31 @@ class _TransactionListPageState extends State<TransactionListPage> {
                               ),
                               Row(
                                 mainAxisSize: MainAxisSize.min,
-                                crossAxisAlignment: CrossAxisAlignment.center, // Align items vertically
+                                crossAxisAlignment: CrossAxisAlignment.center,
                                 children: [
-                                  Padding( // Add slight padding if amount feels too close to delete icon
+                                  Padding(
                                     padding: const EdgeInsets.only(right: 4.0),
-                                    child: Text(
-                                      formattedAmount,
-                                      style: TextStyle(
-                                        fontSize: 14,
-                                        fontWeight: FontWeight.bold,
-                                        color: transaction.amount < 0 ? Colors.redAccent : Theme.of(context).colorScheme.primary,
-                                      ),
-                                    ),
+                                    child: Text(formattedAmount, style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: transaction.amount < 0 ? Colors.redAccent : Theme.of(context).colorScheme.primary)),
                                   ),
-                                  // IconButton itself has some intrinsic padding, making it smaller can be tricky
-                                  // We already have minimal padding on it.
                                   IconButton(
                                     icon: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 20),
-                                    padding: const EdgeInsets.only(left: 4, top:0, bottom:0, right:0), // Adjusted left padding slightly
+                                    padding: const EdgeInsets.only(left: 4, top:0, bottom:0, right:0),
                                     constraints: const BoxConstraints(),
                                     tooltip: 'Delete Transaction',
-                                    onPressed: () {
-                                      if (transaction.id != null) {
-                                        _showDeleteConfirmationDialog(transaction);
-                                      } else {
-                                        print("TransactionListPage: Delete pressed for item with null ID!");
-                                      }
-                                    },
+                                    onPressed: () => _showDeleteConfirmationDialog(transaction),
                                   ),
                                 ],
                               ),
                             ],
                           ),
                           if (isExpanded) ...[
-                            const SizedBox(height: 8), // This space only applies when expanded
-                            Text(
-                              transaction.description, // Full description when expanded
-                              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
-                            ),
+                            const SizedBox(height: 8),
+                            Text(transaction.description.isNotEmpty ? transaction.description : "No description", style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500)),
                             if (transaction.tags.isNotEmpty) ...[
                               const SizedBox(height: 4),
-                              Text(
-                                'Tags: ${transaction.tags}',
-                                style: const TextStyle(fontSize: 12, color: Colors.grey),
-                              ),
+                              Text('Tags: ${transaction.tags}', style: const TextStyle(fontSize: 12, color: Colors.grey)),
                             ],
-                            const SizedBox(height: 4), // Small padding at the bottom when expanded
+                            const SizedBox(height: 4),
                           ]
                         ],
                       ),

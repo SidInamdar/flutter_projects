@@ -43,3 +43,10 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Sensitive Firebase config files (RECOMMENDED TO IGNORE FOR PUBLIC REPOS)
+/android/app/google-services.json
+/ios/Runner/GoogleService-Info.plist
+# Consider for lib/firebase_options.dart if contributors should generate their own
+/lib/firebase_options.dart
+firebase.json
