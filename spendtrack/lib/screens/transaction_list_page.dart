@@ -5,6 +5,7 @@ import 'package:spendtrack/services/auth_service.dart'; // For AuthService
 import 'package:spendtrack/models/transaction_model.dart';
 import 'package:spendtrack/db/database_helper.dart'; // Now uses Firebase
 import 'package:spendtrack/screens/add_transaction_page.dart';
+import 'package:spendtrack/screens/summary_page.dart';
 
 class TransactionListPage extends StatefulWidget {
   const TransactionListPage({super.key});
@@ -140,6 +141,16 @@ class _TransactionListPageState extends State<TransactionListPage> {
           IconButton(
             icon: const Icon(Icons.refresh),
             onPressed: _loadTransactions,
+          ),
+          IconButton( // <<< --- ADD THIS OR SIMILAR --- >>>
+            icon: const Icon(Icons.bar_chart_rounded), // Or Icons.pie_chart, Icons.insights, etc.
+            tooltip: 'View Summary',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const SummaryPage()),
+              );
+            },
           ),
           IconButton(
             icon: const Icon(Icons.logout),
