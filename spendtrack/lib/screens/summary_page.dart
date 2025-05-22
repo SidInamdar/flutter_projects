@@ -1,26 +1,34 @@
+// lib/screens/summary_page.dart
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart'; // For date and number formatting
 import 'package:provider/provider.dart';
 import 'package:syncfusion_flutter_charts/charts.dart'; // Syncfusion charts import
 
 // Assuming these models and services are correctly defined in your project
-import 'package:spendtrack/models/transaction_model.dart'; // Replace your_app_name
-import 'package:spendtrack/db/database_helper.dart';     // Replace your_app_name (Firebase service)
-import 'package:spendtrack/services/auth_service.dart';   // Replace your_app_name
+import 'package:spendtrack/models/transaction_model.dart';
+import 'package:spendtrack/db/database_helper.dart';
+import 'package:spendtrack/services/auth_service.dart';
 
-// Enum for time filters - REMOVED weekly
+// Enum for time filters
 enum TimeFilter { daily, monthly, custom }
 
 // Helper class for chart data points
 class ChartData {
   ChartData(this.x, this.y, [this.xValue]);
-  final dynamic x; // DateTime for line chart's actual X value, String for bar chart's category
+  final dynamic x;
   final double y;
-  final String? xValue; // Optional: For bar chart display label if x is not the label itself
+  final String? xValue;
 }
 
 class SummaryPage extends StatefulWidget {
-  const SummaryPage({super.key});
+  final String? targetUserId; // ID of the user whose summary is to be viewed
+  final String? targetUserName; // Display name of the target user
+
+  const SummaryPage({
+    super.key,
+    this.targetUserId,
+    this.targetUserName,
+  });
 
   @override
   State<SummaryPage> createState() => _SummaryPageState();
@@ -35,20 +43,27 @@ class _SummaryPageState extends State<SummaryPage> {
 
   TimeFilter _selectedTimeFilter = TimeFilter.monthly;
   Set<String> _availableTags = {};
-  Set<String> _selectedTags = {};
+  Set<String> _selectedTags = {}; // These will be the viewing user's temporary filter selection
   DateTimeRange? _customDateRange;
 
   List<ChartData> _cumulativeExpenseData = [];
   List<ChartData> _expenseBarData = [];
   double _maxYForBarChart = 0.0;
-  double _maxYForCumulativeChart = 0.0; // Added for cumulative chart Y-axis scaling
+  double _maxYForCumulativeChart = 0.0;
 
   TooltipBehavior? _lineChartTooltipBehavior;
   TooltipBehavior? _barChartTooltipBehavior;
 
+  String? _currentViewingUserId;
+
   @override
   void initState() {
     super.initState();
+    print("SummaryPage: initState");
+
+    final authService = Provider.of<AuthService>(context, listen: false);
+    _currentViewingUserId = widget.targetUserId ?? authService.currentUser?.uid;
+
     _lineChartTooltipBehavior = TooltipBehavior(
         enable: true,
         header: 'Date',
@@ -81,25 +96,53 @@ class _SummaryPageState extends State<SummaryPage> {
   }
 
   Future<void> _fetchInitialData() async {
-    if (!mounted) return;
-    setState(() => _isLoading = true);
+    if (!mounted || _currentViewingUserId == null) {
+      if (_currentViewingUserId == null) print("SummaryPage: Cannot fetch data, currentViewingUserId is null.");
+      if (mounted) setState(() => _isLoading = false);
+      return;
+    }
+    if (mounted) setState(() => _isLoading = true);
+    print("SummaryPage: Fetching initial data for user ID: $_currentViewingUserId");
+
     try {
-      final authService = Provider.of<AuthService>(context, listen: false);
-      if (authService.currentUser == null) throw Exception("User not logged in");
-      final transactions = await _dbHelper.getAllTransactions();
+      List<TransactionModel> transactions;
+      final authService = Provider.of<AuthService>(context, listen: false); // Get AuthService instance
+
+      if (widget.targetUserId != null && widget.targetUserId != authService.currentUser?.uid) {
+        print("SummaryPage: Fetching transactions for target user: ${widget.targetUserId}");
+        transactions = await _dbHelper.getAllTransactionsForUser(widget.targetUserId!);
+      } else {
+        print("SummaryPage: Fetching transactions for current user.");
+        transactions = await _dbHelper.getAllTransactions();
+      }
+
       if (!mounted) return;
-      _allTransactions = transactions.where((t) => t.amount > 0)
+
+      _allTransactions = transactions
+          .where((t) => t.amount > 0)
           .map((t) => TransactionModel(id: t.id, amount: t.amount, description: t.description, tags: t.tags, date: t.date))
           .toList();
+
       _extractAvailableTags();
+      // When fetching data for a *different* user, reset local filters to default
+      // to avoid applying User A's last filter selection to User B's data initially.
+      if (widget.targetUserId != null && widget.targetUserId != authService.currentUser?.uid) {
+        _selectedTimeFilter = TimeFilter.monthly; // Default time filter
+        _selectedTags = {}; // Clear selected tags
+        _customDateRange = null;
+      }
       await _applyFiltersAndProcessData();
+
     } catch (e, s) {
       print("SummaryPage: Error fetching initial data: $e\n$s");
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Error loading summary: ${e.toString()}"), backgroundColor: Colors.red));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Error loading summary: ${e.toString()}"), backgroundColor: Colors.red),
+        );
       }
     } finally {
       if (mounted) setState(() => _isLoading = false);
+      print("SummaryPage: Initial data fetching complete. isLoading: $_isLoading");
     }
   }
 
@@ -115,6 +158,7 @@ class _SummaryPageState extends State<SummaryPage> {
     }
     if (!mounted) return;
     _availableTags = Set.from(tags.toList()..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase())));
+    print("SummaryPage: Extracted available tags for user $_currentViewingUserId: $_availableTags");
   }
 
   DateTimeRange _getDateRangeForFilter(TimeFilter filter, DateTime now) {
@@ -133,6 +177,8 @@ class _SummaryPageState extends State<SummaryPage> {
   Future<void> _applyFiltersAndProcessData() async {
     if (!mounted) return;
     setState(() => _isProcessingFilters = true);
+    print("SummaryPage: Applying filters for user $_currentViewingUserId (Time: $_selectedTimeFilter, Tags: $_selectedTags)");
+
     await Future.delayed(Duration.zero);
 
     final now = DateTime.now();
@@ -144,30 +190,39 @@ class _SummaryPageState extends State<SummaryPage> {
 
     _filteredTransactions = _allTransactions.where((transaction) {
       final transactionDate = transaction.date;
-      bool dateMatch = !transactionDate.isBefore(activeDateRange.start) && !transactionDate.isAfter(inclusiveEndDate);
-      bool tagMatch = _selectedTags.isEmpty || _selectedTags.any((selectedTag) =>
-          transaction.tags.split(',').map((t) => t.trim().toLowerCase()).contains(selectedTag.toLowerCase()));
+      bool dateMatch = !transactionDate.isBefore(activeDateRange.start) &&
+          !transactionDate.isAfter(inclusiveEndDate);
+
+      bool tagMatch = true;
+      if (_selectedTags.isNotEmpty) {
+        tagMatch = _selectedTags.any((selectedTag) =>
+            transaction.tags.split(',').map((t) => t.trim().toLowerCase()).contains(selectedTag.toLowerCase()));
+      }
+
       return dateMatch && tagMatch;
     }).toList();
 
     _filteredTransactions.sort((a,b) => a.date.compareTo(b.date));
+    print("SummaryPage: Filtered down to ${_filteredTransactions.length} transactions for user $_currentViewingUserId.");
+
     _processDataForChartsLogic();
 
-    if (mounted) setState(() => _isProcessingFilters = false);
+    if (mounted) {
+      setState(() => _isProcessingFilters = false);
+    }
   }
 
   void _processDataForChartsLogic() {
-    // 1. Cumulative Expense Data
+    // ... (Keep the existing data processing logic from Step 4/5, it's correct for the data)
+    print("SummaryPage: Processing chart data for user $_currentViewingUserId with ${_filteredTransactions.length} transactions.");
     List<ChartData> newCumulativeData = [];
     double cumulativeSum = 0;
     double maxCumulativeY = 0;
     Map<DateTime, double> dailyAggregatedAmounts = {};
-
     for (var transaction in _filteredTransactions) {
       final dayKey = DateTime(transaction.date.year, transaction.date.month, transaction.date.day);
       dailyAggregatedAmounts[dayKey] = (dailyAggregatedAmounts[dayKey] ?? 0) + transaction.amount;
     }
-
     List<DateTime> sortedDays = dailyAggregatedAmounts.keys.toList()..sort();
     for (DateTime dayKey in sortedDays) {
       cumulativeSum += dailyAggregatedAmounts[dayKey]!;
@@ -175,19 +230,11 @@ class _SummaryPageState extends State<SummaryPage> {
       if (cumulativeSum > maxCumulativeY) maxCumulativeY = cumulativeSum;
     }
     _cumulativeExpenseData = newCumulativeData;
-    _maxYForCumulativeChart = maxCumulativeY == 0 ? 100 : (maxCumulativeY * 1.20); // 20% padding
+    _maxYForCumulativeChart = maxCumulativeY == 0 ? 100 : (maxCumulativeY * 1.20);
 
-    print("SummaryPage: Cumulative Data Points for Chart:");
-    for (var dataPoint in _cumulativeExpenseData) {
-      print(" - X: ${DateFormat.yMd().format(dataPoint.x as DateTime)}, Y: ${dataPoint.y}");
-    }
-
-
-    // 2. Expense Bar Data
     List<ChartData> newBarData = [];
     Map<String, double> barMap = {};
     double newMaxYForBar = 0.0;
-
     if (_selectedTags.isNotEmpty) {
       List<String> sortedSelectedTags = _selectedTags.toList()..sort((a,b) => a.toLowerCase().compareTo(b.toLowerCase()));
       for (var tag in sortedSelectedTags) barMap[tag] = 0;
@@ -234,6 +281,7 @@ class _SummaryPageState extends State<SummaryPage> {
   }
 
   Widget _buildFilterControls() {
+    // REMOVED: canEditFilters logic, AbsorbPointer, and Opacity. Filters are always active.
     return Padding(
       padding: const EdgeInsets.all(16.0),
       child: Column(
@@ -251,9 +299,12 @@ class _SummaryPageState extends State<SummaryPage> {
                   child: ChoiceChip(
                     label: Text(filter.name[0].toUpperCase() + filter.name.substring(1)),
                     selected: isSelected,
-                    onSelected: (bool selected) {
+                    onSelected: (bool selected) { // Always enabled
                       if (selected) {
-                        setState(() => _selectedTimeFilter = filter);
+                        setState(() {
+                          _selectedTimeFilter = filter;
+                          _customDateRange = null; // Clear custom range if predefined is chosen
+                        });
                         _applyFiltersAndProcessData();
                       }
                     },
@@ -268,14 +319,14 @@ class _SummaryPageState extends State<SummaryPage> {
           Text("Filter by Tags", style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
           const SizedBox(height: 8.0),
           _availableTags.isEmpty && !_isLoading
-              ? const Padding(padding: EdgeInsets.symmetric(vertical: 8.0), child: Text("No tags found.", style: TextStyle(color: Colors.grey)))
+              ? const Padding(padding: EdgeInsets.symmetric(vertical: 8.0), child: Text("No tags found in this user's transactions.", style: TextStyle(color: Colors.grey)))
               : Wrap(
             spacing: 8.0, runSpacing: 4.0,
             children: _availableTags.map((tag) {
               bool isSelected = _selectedTags.contains(tag);
               return FilterChip(
                 label: Text(tag), selected: isSelected,
-                onSelected: (bool selected) {
+                onSelected: (bool selected) { // Always enabled
                   setState(() {
                     if (selected) _selectedTags.add(tag); else _selectedTags.remove(tag);
                   });
@@ -293,42 +344,41 @@ class _SummaryPageState extends State<SummaryPage> {
   }
 
   Widget _buildCumulativeChart() {
-    if (_cumulativeExpenseData.length < 2 && !_isLoading && !_isProcessingFilters) { // Needs at least 2 points
+    // ... (Keep the existing _buildCumulativeChart method from Step 5, it's correct)
+    if (_cumulativeExpenseData.length < 2 && !_isLoading && !_isProcessingFilters) {
       return Center(
         heightFactor: 5,
         child: Text(_cumulativeExpenseData.isEmpty
             ? "No data for cumulative plot."
-            : "Not enough data for trend (needs >1 day). Total: ${NumberFormat.currency(locale: 'en_IN', name: 'INR', symbol: '₹', decimalDigits: 0).format(_cumulativeExpenseData.first.y)}",
+            : "Not enough data for trend. Total: ${NumberFormat.currency(locale: 'en_IN', name: 'INR', symbol: '₹', decimalDigits: 0).format(_cumulativeExpenseData.first.y)}",
             textAlign: TextAlign.center),
       );
     }
     if (_cumulativeExpenseData.isEmpty) return const SizedBox.shrink();
 
-
     return SfCartesianChart(
-      key: ValueKey('cumulativeChart_$_selectedTimeFilter\_${_selectedTags.join('_')}'),
+      key: ValueKey('cumulativeChart_$_currentViewingUserId\_$_selectedTimeFilter\_${_selectedTags.join('_')}'),
       plotAreaBorderWidth: 0,
       primaryXAxis: DateTimeAxis(
-        // Determine minimum and maximum from the data to ensure the axis fits the data
         minimum: _cumulativeExpenseData.first.x as DateTime,
         maximum: _cumulativeExpenseData.last.x as DateTime,
-        dateFormat: _getAxisDateFormat(), // Dynamic date format
-        intervalType: _getAxisIntervalType(), // Dynamic interval type
+        dateFormat: _getAxisDateFormat(),
+        intervalType: _getAxisIntervalType(),
+        interval: _getAxisInterval(),
         majorGridLines: const MajorGridLines(width: 0),
         axisLine: const AxisLine(width: 0.7, color: Colors.grey),
-        majorTickLines: const MajorTickLines(size: 0), // Hide major ticks
+        majorTickLines: const MajorTickLines(size: 0),
         labelStyle: const TextStyle(color: Colors.black54, fontSize: 10),
         edgeLabelPlacement: EdgeLabelPlacement.shift,
-        labelRotation: -45, // Rotate labels to prevent overlap
-        interval: _getAxisInterval(), // Calculate interval based on range
+        labelRotation: -45,
       ),
       primaryYAxis: NumericAxis(
         numberFormat: NumberFormat.currency(locale: 'en_IN', name: 'INR', symbol: '₹', decimalDigits: 0),
         majorGridLines: const MajorGridLines(width: 0.5, dashArray: <double>[3, 3], color: Colors.grey),
         axisLine: const AxisLine(width: 0),
         labelStyle: const TextStyle(color: Colors.black54, fontSize: 10),
-        minimum: 0, // Always start Y axis at 0 for cumulative
-        maximum: _maxYForCumulativeChart, // Use calculated max Y
+        minimum: 0,
+        maximum: _maxYForCumulativeChart,
       ),
       series: <CartesianSeries<ChartData, DateTime>>[
         SplineAreaSeries<ChartData, DateTime>(
@@ -338,64 +388,61 @@ class _SummaryPageState extends State<SummaryPage> {
           name: 'Cumulative Expenses',
           color: Theme.of(context).colorScheme.primary.withOpacity(0.15),
           borderColor: Theme.of(context).colorScheme.primary,
-          borderWidth: 2, // Ensure line is visible
+          borderWidth: 2,
           animationDuration: 700,
         )
       ],
       tooltipBehavior: _lineChartTooltipBehavior,
-      margin: const EdgeInsets.fromLTRB(5, 10, 15, 10), // L,T,R,B
+      margin: const EdgeInsets.fromLTRB(5, 10, 15, 10),
     );
   }
 
   DateFormat _getAxisDateFormat() {
+    // ... (Keep existing logic)
     if (_cumulativeExpenseData.length < 2) return DateFormat.MMMd();
     final firstDate = _cumulativeExpenseData.first.x as DateTime;
     final lastDate = _cumulativeExpenseData.last.x as DateTime;
     final rangeInDays = lastDate.difference(firstDate).inDays;
-
-    if (rangeInDays <= 1) return DateFormat.jm(); // Time if same day
-    if (rangeInDays <= 14) return DateFormat.Md(); //  M/d for up to 2 weeks
-    if (rangeInDays <= 70) return DateFormat.MMMd(); // May 20 for up to ~2 months
-    return DateFormat.MMM(); // May for longer
+    if (rangeInDays <= 1 && _selectedTimeFilter == TimeFilter.daily) return DateFormat.jm();
+    if (rangeInDays <= 14) return DateFormat.Md();
+    if (rangeInDays <= 70) return DateFormat.MMMd();
+    return DateFormat.MMM();
   }
 
   DateTimeIntervalType _getAxisIntervalType() {
+    // ... (Keep existing logic)
     if (_cumulativeExpenseData.length < 2) return DateTimeIntervalType.days;
     final firstDate = _cumulativeExpenseData.first.x as DateTime;
     final lastDate = _cumulativeExpenseData.last.x as DateTime;
     final rangeInDays = lastDate.difference(firstDate).inDays;
-
-    if (rangeInDays <= 1) return DateTimeIntervalType.hours;
-    if (rangeInDays <= 35) return DateTimeIntervalType.days; // Up to 5 weeks, show days
-    // If DateTimeIntervalType.weeks is problematic, use days with larger interval or months
-    // For now, let's try to avoid .weeks if it was the source of the error.
-    // if (rangeInDays <= 120) return DateTimeIntervalType.days; // For up to ~4 months, show days with larger interval
+    if (rangeInDays <= 1 && _selectedTimeFilter == TimeFilter.daily) return DateTimeIntervalType.hours;
+    if (rangeInDays <= 35) return DateTimeIntervalType.days;
     return DateTimeIntervalType.months;
   }
 
-  double? _getAxisInterval() { // Returns interval value, or null for auto
+  double? _getAxisInterval() {
+    // ... (Keep existing logic)
     if (_cumulativeExpenseData.length < 2) return null;
     final firstDate = _cumulativeExpenseData.first.x as DateTime;
     final lastDate = _cumulativeExpenseData.last.x as DateTime;
     final rangeInDays = lastDate.difference(firstDate).inDays.abs();
-
-    if (rangeInDays <= 1) return 6; // Interval of 6 hours if range is 1 day or less
-    if (rangeInDays <= 7) return 1; // Interval of 1 day for a week
-    if (rangeInDays <= 14) return 2; // Interval of 2 days for two weeks
-    if (rangeInDays <= 35) return 7; // Interval of 7 days (1 week) for up to 5 weeks
-    // For monthly, Syncfusion's DateTimeIntervalType.months usually handles it well.
-    // If we use DateTimeIntervalType.days for longer periods, we might set a larger day interval.
-    // if (rangeInDays <= 120) return 15; // Approx. 2 labels per month
-    return null; // Let Syncfusion decide for months or if DateTimeIntervalType.auto is used
+    final intervalType = _getAxisIntervalType();
+    if (intervalType == DateTimeIntervalType.hours) return 6;
+    if (intervalType == DateTimeIntervalType.days) {
+      if (rangeInDays <= 7) return 1;
+      if (rangeInDays <= 14) return 2;
+      return 7;
+    }
+    return null;
   }
 
-
   Widget _buildExpenseBarChart() {
+    // ... (Keep the existing _buildExpenseBarChart method from Step 6, it's correct)
     if (_expenseBarData.isEmpty) {
       return const Center(heightFactor: 5, child: Text("No data available for the selected filters."));
     }
     return SfCartesianChart(
-      key: ValueKey('barChart_$_selectedTimeFilter\_${_selectedTags.join('_')}'),
+      key: ValueKey('barChart_$_currentViewingUserId\_$_selectedTimeFilter\_${_selectedTags.join('_')}'),
       plotAreaBorderWidth: 0,
       primaryXAxis: CategoryAxis(
         majorGridLines: const MajorGridLines(width: 0),
@@ -403,7 +450,6 @@ class _SummaryPageState extends State<SummaryPage> {
         majorTickLines: const MajorTickLines(size: 0),
         labelStyle: const TextStyle(color: Colors.black54, fontSize: 10),
         labelIntersectAction: AxisLabelIntersectAction.rotate45,
-        // interval: 1, // Show all labels for CategoryAxis if possible
       ),
       primaryYAxis: NumericAxis(
         numberFormat: NumberFormat.currency(locale: 'en_IN', name: 'INR', symbol: '₹', decimalDigits: 0),
@@ -421,14 +467,13 @@ class _SummaryPageState extends State<SummaryPage> {
           name: 'Expenses',
           color: Theme.of(context).colorScheme.secondary,
           borderRadius: const BorderRadius.all(Radius.circular(3)),
-          width: _expenseBarData.length > 5 ? 0.7 : 0.4, // Wider bars for fewer items
+          width: _expenseBarData.length > 5 ? 0.7 : 0.4,
           dataLabelSettings: DataLabelSettings(
               isVisible: true,
               labelAlignment: ChartDataLabelAlignment.top,
-              textStyle: TextStyle(fontSize: 9, color: Colors.grey[800], fontWeight: FontWeight.w500),
-              // Use builder for custom data label format if needed
               builder: (dynamic data, dynamic point, dynamic series, int pointIndex, int seriesIndex) {
                 final chartData = data as ChartData;
+                if (chartData.y == 0) return const Text('');
                 return Text(NumberFormat.compact(locale: 'en_IN').format(chartData.y), style: TextStyle(fontSize: 9, color: Colors.grey[800]));
               }
           ),
@@ -443,15 +488,21 @@ class _SummaryPageState extends State<SummaryPage> {
   @override
   Widget build(BuildContext context) {
     bool showChartLoader = _isProcessingFilters && !_isLoading;
+    final authService = Provider.of<AuthService>(context, listen: false);
+    final String pageTitle = widget.targetUserName != null && widget.targetUserId != authService.currentUser?.uid
+        ? "${widget.targetUserName}'s Summary"
+        : "My Transaction Summary";
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Transaction Summary'),
+        title: Text(pageTitle),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: (_isLoading || _isProcessingFilters) ? null : _fetchInitialData,
-            tooltip: "Refresh Data",
-          )
+          if (widget.targetUserId == null || widget.targetUserId == authService.currentUser?.uid || widget.targetUserId != null)
+            IconButton(
+              icon: const Icon(Icons.refresh),
+              onPressed: (_isLoading || _isProcessingFilters) ? null : _fetchInitialData,
+              tooltip: "Refresh Data",
+            )
         ],
       ),
       body: _isLoading
@@ -460,7 +511,7 @@ class _SummaryPageState extends State<SummaryPage> {
         onRefresh: _fetchInitialData,
         child: ListView(
           children: <Widget>[
-            _buildFilterControls(),
+            _buildFilterControls(), // Filters are now always enabled
             const Divider(height: 1, thickness: 1),
             const SizedBox(height: 10),
             Padding(
@@ -468,7 +519,7 @@ class _SummaryPageState extends State<SummaryPage> {
               child: Text("Cumulative Expenses", style: Theme.of(context).textTheme.titleLarge?.copyWith(fontSize: 18)),
             ),
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 4.0), // Reduced padding
+              padding: const EdgeInsets.symmetric(horizontal: 4.0),
               height: 250,
               child: showChartLoader ? const Center(child: CircularProgressIndicator(strokeWidth: 2)) : _buildCumulativeChart(),
             ),
@@ -478,7 +529,7 @@ class _SummaryPageState extends State<SummaryPage> {
               child: Text("Expense Bar Plot", style: Theme.of(context).textTheme.titleLarge?.copyWith(fontSize: 18)),
             ),
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 4.0), // Reduced padding
+              padding: const EdgeInsets.symmetric(horizontal: 4.0),
               height: 250,
               child: showChartLoader ? const Center(child: CircularProgressIndicator(strokeWidth: 2)) : _buildExpenseBarChart(),
             ),
